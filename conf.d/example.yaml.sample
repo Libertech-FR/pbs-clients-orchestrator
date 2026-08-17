@@ -1,0 +1,46 @@
+# Copier ce fichier sous CONF_DIR/<nom-du-job>.yaml (ex: web01.yaml) et
+# chmod 600 (contient potentiellement un mot de passe / token).
+# Le nom du job = nom du fichier sans l'extension .yaml/.yml
+
+ssh:
+  host: web01.example.com
+  port: 22
+  user: root
+  key: /root/.ssh/id_pbs_backup
+
+pbs:
+  # Cible Proxmox Backup Server. Préférer un token API plutôt qu'un mot de
+  # passe utilisateur.
+  repository: "backup@pbs!token@pbs.example.com:datastore1"
+  password: "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  # Alternative pour ne pas stocker le secret en clair dans ce fichier:
+  # password_file: /etc/pbs-backup/secrets/web01.token
+  fingerprint: "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99"
+  namespace: ""
+
+backup:
+  # Une entrée par source, format "nom-archive.pxar:/chemin"
+  # (ou "nom.img:/dev/xxx" pour un disque)
+  sources:
+    - "root.pxar:/"
+    - "etc.pxar:/etc"
+  backup_id: ""
+  extra_opts:
+    - "--exclude /var/tmp"
+    - "--exclude /tmp"
+    - "--exclude /var/cache"
+  remote_tmp_dir: /root/.pbs-backup
+
+nobackup_marker:
+  # Exclut automatiquement tout répertoire contenant ce fichier marqueur
+  # (recherché sur la machine cible, au moment de la sauvegarde).
+  enabled: true
+  name: .nobackup
+
+hooks:
+  # Commandes exécutées sur la machine cible, via "bash -c". pre_backup doit
+  # réussir pour que la sauvegarde démarre. post_backup s'exécute toujours
+  # (succès, échec de la sauvegarde ou du hook pre_backup) et n'affecte pas
+  # le code de sortie du job.
+  pre_backup: ""
+  post_backup: ""

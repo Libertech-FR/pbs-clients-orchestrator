@@ -1,0 +1,4 @@
+# pbs_backup_orchestrator.py n'utilise que la bibliothèque standard, sauf
+# pour lire des fichiers de configuration au format YAML (optionnel : le
+# JSON reste géré sans dépendance).
+PyYAML
