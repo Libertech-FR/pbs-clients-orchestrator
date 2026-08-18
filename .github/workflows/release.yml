@@ -13,6 +13,7 @@ jobs:
       - name: copy sources
         run: |
           mkdir -p .debpkg/etc/pbs_backup_orchestrator/conf.d
+          mkdir -p .debpkg/usr/bin
           cp pbs_backup_orchestrator.py .debpkg/usr/bin
           chmod 700 .debpkg//usr/bin/pbs_backup_orchestrator.py
           cp conf.d/* .debpkg/etc/pbs_backup_orchestrator/conf.d
