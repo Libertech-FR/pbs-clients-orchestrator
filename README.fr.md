@@ -1,4 +1,15 @@
-# pbs_backup — Fichier de configuration d'un job
+# Installation 
+
+Un paquet .deb est fourni pour l'installation à l'aide de dpkg.
+
+Vous devez générer une clé SSH pour root 
+```
+ssh-keygen -t ed25519 -f /root/.ssh/id_pbs_backup
+``` 
+Installer la clé publique (.pub) sur la machine à sauvegarder.
+
+
+# pbs_backup_orchestrator — Fichier de configuration d'un job
 
 *[English version](README.md)*
 
@@ -27,8 +38,8 @@ Des exemples commentés sont fournis dans `conf.d/example.yaml.sample` et
 
 ## Structure
 
-Le fichier est un objet/mapping avec cinq sections : `ssh`, `pbs`, `backup`,
-`nobackup_marker` et `hooks`.
+Le fichier est un objet/mapping avec six sections : `ssh`, `pbs`, `backup`,
+`nobackup_marker`, `hooks` et `notify`.
 
 ### `ssh` — accès à la machine cible
 
@@ -94,6 +105,34 @@ pour chaque chemin source déclaré dans `backup.sources`.
 Ces commandes sont exécutées **sur la machine cible**, pas sur la machine
 qui héberge l'orchestrateur.
 
+### `notify` — notifications de succès/échec
+
+Envoyées par l'**orchestrateur** (pas par la machine cible) après chaque
+job, via le même type de canal que les cibles de notification propres à
+PBS (gotify / webhook / sendmail).
+
+| Clé                 | Type   | Obligatoire | Défaut  | Description                                                          |
+|----------------------|--------|-------------|---------|--------------------------------------------------------------------------|
+| `when`               | string | non         | `error` | `always` (succès et échec), `error` (échec seulement) ou `never`     |
+| `type`               | string | non         | —       | `gotify`, `webhook` ou `sendmail`. Vide = notifications désactivées. |
+| `gotify.server`      | string | si utilisé  | —       | URL de base du serveur Gotify                                        |
+| `gotify.token`       | string | si utilisé  | —       | Token d'application Gotify                                            |
+| `gotify.priority`    | int    | non         | `5`     | Priorité du message Gotify                                            |
+| `webhook.url`        | string | si utilisé  | —       | URL du webhook, appelée avec un corps JSON (`job`, `host`, `status`, `subject`, `message`) |
+| `webhook.method`     | string | non         | `POST`  | Méthode HTTP                                                          |
+| `webhook.headers`    | object | non         | `{}`    | En-têtes HTTP supplémentaires (ex: un token `Authorization`)          |
+| `sendmail.mailto`    | liste[string] | si utilisé | — | Adresse(s) destinataire(s), transmises au binaire `sendmail` local  |
+| `sendmail.mailfrom`  | string | non         | `pbs-backup@<hostname>` | Adresse expéditeur                                    |
+
+Remarque : la clé de config est `when`, pas `on` — en YAML 1.1, une clé nue
+`on:` est interprétée comme le booléen `true` et non comme la chaîne
+`"on"`, d'où ce choix volontaire.
+
+Seule la sous-section correspondant à `type` est utilisée. Un champ
+manquant/inutilisable (ex: pas de `webhook.url`) déclenche un avertissement
+et ignore cette notification, sans jamais faire échouer le job de
+sauvegarde lui-même. Aucune notification n'est envoyée en `--dry-run`.
+
 ## Exemple minimal (YAML)
 
 ```yaml
@@ -130,6 +169,3 @@ pbs-backup-orchestrator --dry-run
 # Utiliser un autre répertoire de configuration
 pbs-backup-orchestrator --conf-dir /chemin/vers/conf.d
 ```
-
-Voir `install.sh` pour l'installation sur Debian (venv Python dédié,
-lanceur `/usr/local/bin/pbs-backup-orchestrator`).

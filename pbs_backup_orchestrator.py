@@ -19,13 +19,20 @@ import fcntl
 import json
 import logging
 import shlex
+import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
+from datetime import datetime
+from email.message import EmailMessage
 from pathlib import Path
 
-DEFAULT_CONF_DIR = Path("/etc/pbs_backup_orchestrator/conf.d")
+DEFAULT_CONF_DIR = Path("/etc/pbs-backup-orchestrator/conf.d")
 DEFAULT_LOCK_FILE = Path("/var/run/pbs-backup-orchestrator.lock")
 
 log = logging.getLogger("pbs-backup")
@@ -33,6 +40,18 @@ log = logging.getLogger("pbs-backup")
 
 class ConfigError(Exception):
     pass
+
+
+@dataclass
+class NotifyConfig:
+    # "always": notifie succès et échec, "error": échec seulement, "never": jamais.
+    # Nommé "when" (et non "on") car en YAML 1.1 la clé nue "on:" est
+    # interprétée comme le booléen True, pas comme la chaîne "on".
+    when: str = "error"
+    type: str = ""  # "gotify" | "webhook" | "sendmail" | ""
+    gotify: dict = field(default_factory=dict)
+    webhook: dict = field(default_factory=dict)
+    sendmail: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -61,6 +80,8 @@ class JobConfig:
     post_backup_cmd: str = ""
 
     remote_tmp_dir: str = "/root/.pbs-backup"
+
+    notify: NotifyConfig = field(default_factory=NotifyConfig)
 
     @property
     def target(self) -> str:
@@ -113,6 +134,7 @@ def load_job_config(path: Path) -> JobConfig:
     backup = _section(data, "backup")
     nobackup = _section(data, "nobackup_marker")
     hooks = _section(data, "hooks")
+    notify = _section(data, "notify")
 
     ssh_host = str(ssh.get("host", "")).strip()
     pbs_repository = str(pbs.get("repository", "")).strip()
@@ -126,6 +148,24 @@ def load_job_config(path: Path) -> JobConfig:
         raise ConfigError(f"{path}: backup.sources est vide")
 
     extra_opts = [str(o).strip() for o in backup.get("extra_opts", []) if str(o).strip()]
+
+    notify_when = str(notify.get("when", "error")).strip().lower() or "error"
+    if notify_when not in ("always", "error", "never"):
+        raise ConfigError(
+            f"{path}: notify.when invalide ({notify_when!r}), attendu 'always', 'error' ou 'never'"
+        )
+    notify_type = str(notify.get("type", "")).strip().lower()
+    if notify_type and notify_type not in ("gotify", "webhook", "sendmail"):
+        raise ConfigError(
+            f"{path}: notify.type invalide ({notify_type!r}), attendu 'gotify', 'webhook' ou 'sendmail'"
+        )
+    notify_cfg = NotifyConfig(
+        when=notify_when,
+        type=notify_type,
+        gotify=_section(notify, "gotify"),
+        webhook=_section(notify, "webhook"),
+        sendmail=_section(notify, "sendmail"),
+    )
 
     return JobConfig(
         name=path.stem,
@@ -146,6 +186,7 @@ def load_job_config(path: Path) -> JobConfig:
         pre_backup_cmd=str(hooks.get("pre_backup", "")),
         post_backup_cmd=str(hooks.get("post_backup", "")),
         remote_tmp_dir=str(backup.get("remote_tmp_dir", "/root/.pbs-backup")),
+        notify=notify_cfg,
     )
 
 
@@ -229,7 +270,7 @@ def ssh_base_args(cfg: JobConfig) -> list[str]:
     return args
 
 
-def push_and_run(cfg: JobConfig, script_text: str) -> bool:
+def push_and_run(cfg: JobConfig, script_text: str) -> tuple[bool, str]:
     remote_dir = cfg.remote_tmp_dir
     remote_script = f"{remote_dir}/{cfg.name}-{Path(tempfile.mktemp()).name}.sh"
 
@@ -248,14 +289,104 @@ def push_and_run(cfg: JobConfig, script_text: str) -> bool:
         )
     except subprocess.CalledProcessError as exc:
         log.error("[%s] échec du push SSH: %s", cfg.name, exc)
-        return False
+        return False, f"Échec du push SSH vers {target}: {exc}"
 
     exec_cmd = f"{shlex.quote(remote_script)}; rc=$?; rm -f {shlex.quote(remote_script)}; exit $rc"
     result = subprocess.run([*ssh_args, target, exec_cmd])
     if result.returncode != 0:
         log.error("[%s] échec de la sauvegarde (code %s)", cfg.name, result.returncode)
-        return False
-    return True
+        return False, f"proxmox-backup-client a échoué sur {target} (code retour {result.returncode})."
+    return True, f"Sauvegarde terminée avec succès sur {target}."
+
+
+def _notify_gotify(cfg: JobConfig, subject: str, body: str) -> None:
+    server = str(cfg.notify.gotify.get("server", "")).rstrip("/")
+    token = str(cfg.notify.gotify.get("token", ""))
+    if not server or not token:
+        log.warning("[%s] notification gotify ignorée: server/token manquant", cfg.name)
+        return
+    priority = int(cfg.notify.gotify.get("priority", 5))
+    payload = json.dumps({"title": subject, "message": body, "priority": priority}).encode()
+    url = f"{server}/message?token={urllib.parse.quote(token)}"
+    req = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"}, method="POST"
+    )
+    try:
+        urllib.request.urlopen(req, timeout=10)
+    except (urllib.error.URLError, OSError) as exc:
+        log.error("[%s] échec de la notification gotify: %s", cfg.name, exc)
+
+
+def _notify_webhook(cfg: JobConfig, subject: str, body: str, ok: bool) -> None:
+    url = str(cfg.notify.webhook.get("url", ""))
+    if not url:
+        log.warning("[%s] notification webhook ignorée: url manquante", cfg.name)
+        return
+    method = str(cfg.notify.webhook.get("method", "POST")).upper()
+    headers = {str(k): str(v) for k, v in cfg.notify.webhook.get("headers", {}).items()}
+    headers.setdefault("Content-Type", "application/json")
+    payload = json.dumps(
+        {
+            "job": cfg.name,
+            "host": cfg.ssh_host,
+            "status": "ok" if ok else "error",
+            "subject": subject,
+            "message": body,
+        }
+    ).encode()
+    req = urllib.request.Request(url, data=payload, headers=headers, method=method)
+    try:
+        urllib.request.urlopen(req, timeout=10)
+    except (urllib.error.URLError, OSError) as exc:
+        log.error("[%s] échec de la notification webhook: %s", cfg.name, exc)
+
+
+def _notify_sendmail(cfg: JobConfig, subject: str, body: str) -> None:
+    mailto = cfg.notify.sendmail.get("mailto", [])
+    if isinstance(mailto, str):
+        mailto = [mailto]
+    mailto = [str(m).strip() for m in mailto if str(m).strip()]
+    if not mailto:
+        log.warning("[%s] notification sendmail ignorée: mailto manquant", cfg.name)
+        return
+    mailfrom = str(cfg.notify.sendmail.get("mailfrom", f"pbs-backup@{socket.gethostname()}"))
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["From"] = mailfrom
+    msg["To"] = ", ".join(mailto)
+    msg.set_content(body)
+
+    sendmail_bin = shutil.which("sendmail") or "/usr/sbin/sendmail"
+    try:
+        subprocess.run([sendmail_bin, "-t", "-oi"], input=msg.as_bytes(), check=True)
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError) as exc:
+        log.error("[%s] échec de la notification sendmail: %s", cfg.name, exc)
+
+
+def send_notification(cfg: JobConfig, ok: bool, message: str) -> None:
+    if cfg.notify.type in ("", "none"):
+        return
+    if cfg.notify.when == "never":
+        return
+    if cfg.notify.when == "error" and ok:
+        return
+
+    subject = f"[pbs-backup] {cfg.name}: {'OK' if ok else 'ECHEC'}"
+    body = (
+        f"Job: {cfg.name}\n"
+        f"Hôte: {cfg.ssh_host}\n"
+        f"Statut: {'succès' if ok else 'échec'}\n"
+        f"Horodatage: {datetime.now().isoformat(timespec='seconds')}\n\n"
+        f"{message}\n"
+    )
+
+    if cfg.notify.type == "gotify":
+        _notify_gotify(cfg, subject, body)
+    elif cfg.notify.type == "webhook":
+        _notify_webhook(cfg, subject, body, ok)
+    elif cfg.notify.type == "sendmail":
+        _notify_sendmail(cfg, subject, body)
 
 
 def run_job(conf_file: Path, dry_run: bool) -> bool:
@@ -272,7 +403,9 @@ def run_job(conf_file: Path, dry_run: bool) -> bool:
         print(script_text)
         return True
 
-    return push_and_run(cfg, script_text)
+    ok, message = push_and_run(cfg, script_text)
+    send_notification(cfg, ok, message)
+    return ok
 
 
 def acquire_lock(lock_file: Path):

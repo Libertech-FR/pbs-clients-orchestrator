@@ -1,13 +1,20 @@
-# pbs_backup — Job configuration file
+
+# Installation 
+The package available is for Dedian (see Packages)
+You must generate a key for root 
+```
+ssh-keygen -t ed25519 -f /root/.ssh/id_pbs_backup
+``` 
+Install the public key on the target machine
+
+# pbs_backup_orchestrator — Job configuration file
 
 *[Version française](README.fr.md)*
 
 `pbs_backup_orchestrator.py` runs [Proxmox Backup Server
 (PBS)](https://pbs.proxmox.com/) backups for remote machines. For each
 machine to back up, it reads a **configuration file** (a "job"), generates
-a bash script, pushes it over SSH to the target machine, and runs it with
-`proxmox-backup-client`.
-
+a bash script, pushes it over SSH to the target machine, and runs it.
 This document describes the format of that configuration file.
 
 ## Location and naming
@@ -27,8 +34,8 @@ Commented examples are provided in `conf.d/example.yaml.sample` and
 
 ## Structure
 
-The file is an object/mapping with five sections: `ssh`, `pbs`, `backup`,
-`nobackup_marker`, and `hooks`.
+The file is an object/mapping with six sections: `ssh`, `pbs`, `backup`,
+`nobackup_marker`, `hooks`, and `notify`.
 
 ### `ssh` — access to the target machine
 
@@ -94,6 +101,34 @@ path declared in `backup.sources`.
 These commands are executed **on the target machine**, not on the machine
 hosting the orchestrator.
 
+### `notify` — success/failure notifications
+
+Sent by the **orchestrator** (not the target machine) after each job, using
+the same kind of channel as PBS's own notification targets (gotify /
+webhook / sendmail).
+
+| Key                | Type   | Required | Default | Description                                                        |
+|---------------------|--------|----------|---------|------------------------------------------------------------------------|
+| `when`              | string | no       | `error` | `always` (success and failure), `error` (failure only), or `never`  |
+| `type`              | string | no       | —       | `gotify`, `webhook`, or `sendmail`. Empty disables notifications.   |
+| `gotify.server`     | string | if used  | —       | Gotify server base URL                                              |
+| `gotify.token`      | string | if used  | —       | Gotify application token                                            |
+| `gotify.priority`   | int    | no       | `5`     | Gotify message priority                                              |
+| `webhook.url`       | string | if used  | —       | Webhook URL, called with a JSON body (`job`, `host`, `status`, `subject`, `message`) |
+| `webhook.method`    | string | no       | `POST`  | HTTP method                                                          |
+| `webhook.headers`   | object | no       | `{}`    | Extra HTTP headers (e.g. an `Authorization` bearer token)           |
+| `sendmail.mailto`   | list[string] | if used | — | Recipient address(es), passed to the local `sendmail` binary        |
+| `sendmail.mailfrom` | string | no       | `pbs-backup@<hostname>` | From address                                        |
+
+Note: the config key is `when`, not `on` — in YAML 1.1 a bare `on:` key is
+parsed as the boolean `true`, not the string `"on"`, so `on` was avoided on
+purpose.
+
+Only the sub-section matching `type` is used. A missing/unusable field
+(e.g. no `webhook.url`) logs a warning and skips that notification; it
+never fails the backup job itself. Notifications are **not** sent during a
+`--dry-run`.
+
 ## Minimal example (YAML)
 
 ```yaml
@@ -130,6 +165,3 @@ pbs-backup-orchestrator --dry-run
 # Use a different configuration directory
 pbs-backup-orchestrator --conf-dir /path/to/conf.d
 ```
-
-See `install.sh` for installation on Debian (dedicated Python venv,
-`/usr/local/bin/pbs-backup-orchestrator` launcher).
