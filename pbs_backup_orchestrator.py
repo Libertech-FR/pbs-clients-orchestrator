@@ -25,7 +25,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-DEFAULT_CONF_DIR = Path("/etc/pbs-backup/conf.d")
+DEFAULT_CONF_DIR = Path("/etc/pbs_backup_orchestrator/conf.d")
 DEFAULT_LOCK_FILE = Path("/var/run/pbs-backup-orchestrator.lock")
 
 log = logging.getLogger("pbs-backup")
